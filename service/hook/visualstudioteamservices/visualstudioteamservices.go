@@ -34,8 +34,41 @@ type RefUpdatesModel struct {
 
 // ResourceModel ...
 type ResourceModel struct {
-	Commits    []CommitsModel    `json:"commits"`
-	RefUpdates []RefUpdatesModel `json:"refUpdates"`
+	Commits               []CommitsModel    `json:"commits"`
+	RefUpdates            []RefUpdatesModel `json:"refUpdates"`
+	Repository            RepositoryModel   `json:"repository"`
+	Status                string            `json:"status"`
+	MergeStatus           string            `json:"mergeStatus"`
+	LastMergeCommit       MergeCommitModel  `json:"lastMergeCommit"`
+	LastMergeSourceCommit MergeCommitModel  `json:"lastMergeSourceCommit"`
+	LastMergeTargetCommit MergeCommitModel  `json:"lastMergeTargetCommit"`
+	SourceRefName         string            `json:"sourceRefName"`
+	TargetRefName         string            `json:"targetRefName"`
+	PullRequestID         int               `json:"pullRequestId"`
+}
+
+// ProjectModel ...
+type ProjectModel struct {
+	ProjectID string `json:"id"`
+	Name      string `json:"name"`
+	URL       string `json:"url"`
+	State     string `json:"state"`
+}
+
+// RepositoryModel ...
+type RepositoryModel struct {
+	RepositoryID  string       `json:"id"`
+	Name          string       `json:"name"`
+	URL           string       `json:"url"`
+	Project       ProjectModel `json:"project"`
+	DefaultBranch string       `json:"defaultBranch"`
+	RemoteURL     string       `json:"remoteUrl"`
+}
+
+// MergeCommitModel ...
+type MergeCommitModel struct {
+	CommitID string `json:"commitId"`
+	URL      string `json:"url"`
 }
 
 // EventMessage ...
@@ -43,8 +76,8 @@ type EventMessage struct {
 	Text string `json:"text"`
 }
 
-// PushEventModel ...
-type PushEventModel struct {
+// AzureEventModel ...
+type AzureEventModel struct {
 	SubscriptionID  string        `json:"subscriptionId"`
 	EventType       string        `json:"eventType"`
 	PublisherID     string        `json:"publisherId"`
@@ -67,20 +100,32 @@ func detectContentType(header http.Header) (string, error) {
 	return contentType, nil
 }
 
-// transformPushEvent ...
-func transformPushEvent(pushEvent PushEventModel) hookCommon.TransformResultModel {
-	if pushEvent.PublisherID != "tfs" {
+// transformEvent ...
+func transformEvent(event AzureEventModel) hookCommon.TransformResultModel {
+	if event.PublisherID != "tfs" {
 		return hookCommon.TransformResultModel{
 			Error: fmt.Errorf("Not a Team Foundation Server notification, can't start a build"),
 		}
 	}
 
-	if pushEvent.EventType != "git.push" {
+	switch event.EventType {
+	case "git.push":
+		return transformPushEvent(event)
+	case "git.pullrequest.created":
+		return transformPullRequestCreatedEvent(event)
+	default:
 		return hookCommon.TransformResultModel{
-			Error: fmt.Errorf("Not a push event, can't start a build"),
+			Error: fmt.Errorf("Not a valid event type, skipping"),
 		}
 	}
 
+}
+
+// ------------
+// Event transformers
+
+// transformPushEvent ...
+func transformPushEvent(pushEvent AzureEventModel) hookCommon.TransformResultModel {
 	if pushEvent.SubscriptionID == "00000000-0000-0000-0000-000000000000" {
 		return hookCommon.TransformResultModel{
 			Error:      fmt.Errorf("Initial (test) event detected, skipping"),
@@ -195,7 +240,39 @@ func transformPushEvent(pushEvent PushEventModel) hookCommon.TransformResultMode
 	return hookCommon.TransformResultModel{
 		Error: fmt.Errorf("Unsupported refs/, can't start a build: %s", pushRef),
 	}
+}
 
+// transformPullRequestCreatedEvent ...
+func transformPullRequestCreatedEvent(pullRequestCreatedEvent AzureEventModel) hookCommon.TransformResultModel {
+	if pullRequestCreatedEvent.Resource.Status != "active" {
+		return hookCommon.TransformResultModel{
+			Error: fmt.Errorf("Pull request created, and completed - does not require a build"),
+		}
+	}
+
+	if pullRequestCreatedEvent.Resource.MergeStatus != "succeeded" {
+		return hookCommon.TransformResultModel{
+			Error: fmt.Errorf("Pull request created but merge failed - not building"),
+		}
+	}
+
+	sourceRefName := strings.TrimPrefix(pullRequestCreatedEvent.Resource.SourceRefName, "refs/heads/")
+	targetRefName := strings.TrimPrefix(pullRequestCreatedEvent.Resource.TargetRefName, "refs/heads/")
+
+	return hookCommon.TransformResultModel{
+		TriggerAPIParams: []bitriseapi.TriggerAPIParamsModel{
+			{
+				BuildParams: bitriseapi.BuildParamsModel{
+					CommitMessage:            pullRequestCreatedEvent.DetailedMessage.Text,
+					CommitHash:               pullRequestCreatedEvent.Resource.LastMergeCommit.CommitID,
+					Branch:                   sourceRefName,
+					BranchDest:               targetRefName,
+					PullRequestID:            &pullRequestCreatedEvent.Resource.PullRequestID,
+					PullRequestRepositoryURL: pullRequestCreatedEvent.Resource.Repository.URL,
+				},
+			},
+		},
+	}
 }
 
 // TransformRequest ...
@@ -206,6 +283,7 @@ func (hp HookProvider) TransformRequest(r *http.Request) hookCommon.TransformRes
 			Error: err,
 		}
 	}
+
 	matched, err := regexp.MatchString("application/json", contentType)
 	if err != nil {
 		return hookCommon.TransformResultModel{
@@ -225,12 +303,12 @@ func (hp HookProvider) TransformRequest(r *http.Request) hookCommon.TransformRes
 		}
 	}
 
-	var pushEvent PushEventModel
+	var pushEvent AzureEventModel
 	if err := json.NewDecoder(r.Body).Decode(&pushEvent); err != nil {
 		return hookCommon.TransformResultModel{
 			Error: fmt.Errorf("Failed to parse request body as JSON: %s", err),
 		}
 	}
 
-	return transformPushEvent(pushEvent)
+	return transformEvent(pushEvent)
 }
