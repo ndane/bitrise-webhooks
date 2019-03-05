@@ -19,6 +19,14 @@ const (
 		"publisherId": "tfs"
 	}`
 
+	samplePullRequestEmptySubscriptionID = `{
+		"subscriptionId": "00000000-0000-0000-0000-000000000000",
+		"notificationId": 4,
+		"id": "daae438c-296b-4512-b08e-571910874e9b",
+		"eventType": "git.pullrequest.created",
+		"publisherId": "tfs"
+	}`
+
 	sampleCodeGitPushBadEventType = `{
 		"subscriptionId": "f0c23515-bcd1-4e30-9613-56a0a129c732",
 		"notificationId": 4,
